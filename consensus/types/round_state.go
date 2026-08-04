@@ -27,6 +27,20 @@ const (
 	RoundStepCommit        = RoundStepType(0x08) // Entered commit state machine
 	// NOTE: RoundStepNewHeight acts as RoundStepCommitWait.
 
+	// RoundStepPrecommitWaitFallback (M0b) is an internal-only timeoutInfo.Step
+	// marker, never a real cs.Step value and never sent over the wire (it is
+	// not accepted by IsValid, deliberately, since a peer should never claim
+	// it as their own step). It exists solely so State can schedule a SECOND
+	// PrecommitWait-shaped timeout via cs.scheduleTimeout: the ticker
+	// (consensus/ticker.go's timeoutRoutine) silently drops any new timeout
+	// whose (height, round, step) doesn't strictly increase the step within
+	// the same round, so re-scheduling RoundStepPrecommitWait itself for a
+	// second attempt would be discarded. Numerically greater than every real
+	// step so the ticker always accepts it. See state.go's handleTimeout
+	// RoundStepPrecommitWait case for the f+1-quorum round-skip fallback
+	// this backs.
+	RoundStepPrecommitWaitFallback = RoundStepType(0x09)
+
 	// NOTE: Update IsValid method if you change this!
 )
 
@@ -54,6 +68,8 @@ func (rs RoundStepType) String() string {
 		return "RoundStepPrecommitWait"
 	case RoundStepCommit:
 		return "RoundStepCommit"
+	case RoundStepPrecommitWaitFallback:
+		return "RoundStepPrecommitWaitFallback"
 	default:
 		return "RoundStepUnknown" // Cannot panic.
 	}

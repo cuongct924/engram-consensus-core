@@ -34,6 +34,12 @@ const (
 	EventRelock             = "Relock"
 	EventTimeoutPropose     = "TimeoutPropose"
 	EventTimeoutWait        = "TimeoutWait"
+	// EventTimeoutCert fires (internal evsw, not the external eventBus used by
+	// EventTimeoutPropose/EventTimeoutWait above) when a validator's local
+	// PrecommitWait timer expires, so the Reactor can broadcast a
+	// TimeoutMessage for f+1-quorum round-skip (engram-sovereign-fsm's M0b,
+	// mirrors spec/core/EngramTendermint.tla's BroadcastTimeout).
+	EventTimeoutCert        = "TimeoutCert"
 	EventUnlock             = "Unlock"
 	EventValidBlock         = "ValidBlock"
 	EventVote               = "Vote"

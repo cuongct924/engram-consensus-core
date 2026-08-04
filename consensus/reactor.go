@@ -286,6 +286,10 @@ func (conR *Reactor) Receive(e p2p.Envelope) {
 			ps.ApplyNewValidBlockMessage(msg)
 		case *HasVoteMessage:
 			ps.ApplyHasVoteMessage(msg)
+		case *TimeoutMessage:
+			// M0b: route into cs.peerMsgQueue like votes/proposals -- State's
+			// receiveRoutine processes it under cs.mtx via handleTimeoutMessage.
+			conR.conS.peerMsgQueue <- msgInfo{msg, e.Src.ID()}
 		case *VoteSetMaj23Message:
 			rs := conR.getRoundState()
 			height, votes := rs.Height, rs.Votes
@@ -493,6 +497,18 @@ func (conR *Reactor) subscribeToBroadcastEvents() {
 	if err != nil {
 		conR.Logger.Error("Error adding listener for NewConsensusParams event", "err", err)
 	}
+
+	err = conR.conS.evsw.AddListenerForEvent(
+		subscriber,
+		types.EventTimeoutCert,
+		func(data cmtevents.EventData) {
+			ti := data.(TimeoutCertInfo)
+			conR.broadcastTimeoutMessage(ti.Height, ti.Round)
+		},
+	)
+	if err != nil {
+		conR.Logger.Error("Error adding listener for TimeoutCert event", "err", err)
+	}
 }
 
 // Safely update the reactor's view of most recent consensus params.
@@ -536,6 +552,19 @@ func (conR *Reactor) broadcastNewValidBlockMessage(rs *cstypes.RoundState) {
 		conR.Switch.BroadcastAsync(p2p.Envelope{
 			ChannelID: StateChannel,
 			Message:   csMsg,
+		})
+	}()
+}
+
+// broadcastTimeoutMessage gossips a TimeoutMessage for (height, round) --
+// M0b's f+1-quorum round-skip, triggered by State.broadcastTimeoutForRound
+// via the EventTimeoutCert listener above.
+func (conR *Reactor) broadcastTimeoutMessage(height int64, round int32) {
+	msg := &cmtcons.Timeout{Height: height, Round: round}
+	go func() {
+		conR.Switch.BroadcastAsync(p2p.Envelope{
+			ChannelID: StateChannel,
+			Message:   msg,
 		})
 	}()
 }
@@ -1667,6 +1696,7 @@ func init() {
 	cmtjson.RegisterType(&HasVoteMessage{}, "tendermint/HasVote")
 	cmtjson.RegisterType(&VoteSetMaj23Message{}, "tendermint/VoteSetMaj23")
 	cmtjson.RegisterType(&VoteSetBitsMessage{}, "tendermint/VoteSetBits")
+	cmtjson.RegisterType(&TimeoutMessage{}, "tendermint/Timeout")
 }
 
 //-------------------------------------
@@ -1915,6 +1945,35 @@ func (m *HasVoteMessage) ValidateBasic() error {
 // String returns a string representation.
 func (m *HasVoteMessage) String() string {
 	return fmt.Sprintf("[HasVote VI:%v V:{%v/%02d/%v}]", m.Index, m.Height, m.Round, m.Type)
+}
+
+//-------------------------------------
+
+// TimeoutMessage is broadcast when a validator's local round timer expires
+// (engram-sovereign-fsm's M0b, spec/core/EngramTendermint.tla's
+// BroadcastTimeout). Receiving f+1 distinct TimeoutMessages for some round
+// r > our current round is what lets an honest validator fast-forward to r
+// without waiting out its own local timer (UponfPlusOneTimeoutsAny) -- see
+// state.go's handleTimeoutMessage for the quorum-counting side.
+type TimeoutMessage struct {
+	Height int64
+	Round  int32
+}
+
+// ValidateBasic performs basic validation.
+func (m *TimeoutMessage) ValidateBasic() error {
+	if m.Height < 0 {
+		return cmterrors.ErrNegativeField{Field: "Height"}
+	}
+	if m.Round < 0 {
+		return cmterrors.ErrNegativeField{Field: "Round"}
+	}
+	return nil
+}
+
+// String returns a string representation.
+func (m *TimeoutMessage) String() string {
+	return fmt.Sprintf("[Timeout H:%v R:%v]", m.Height, m.Round)
 }
 
 //-------------------------------------

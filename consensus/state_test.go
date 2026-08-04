@@ -716,13 +716,21 @@ func TestStateLockPOLRelock(t *testing.T) {
 	ensureNewTimeout(timeoutWaitCh, height, round, cs1.config.Precommit(round).Nanoseconds())
 
 	round++ // moving to the next round
-	// XXX: this isn't guaranteed to get there before the timeoutPropose ...
-	if err := cs1.SetProposalAndBlock(prop, propBlock, propBlockParts, "some peer"); err != nil {
-		t.Fatal(err)
-	}
 
 	ensureNewRound(newRoundCh, height, round)
 	t.Log("### ONTO ROUND 1")
+
+	// M0b: round-skip is now gated on an f+1 timeout quorum (or a bounded
+	// fallback timer) instead of firing synchronously off the local
+	// PrecommitWait timeout, so cs1.Round no longer necessarily reaches
+	// `round` by the time this goroutine resumes after ensureNewTimeout --
+	// setting the proposal here used to race defaultSetProposal's
+	// `proposal.Round != cs.Round` check (state.go) and previously won only
+	// because the old synchronous enterNewRound call left no window for the
+	// race to be lost. Waiting for ensureNewRound above removes the race.
+	if err := cs1.SetProposalAndBlock(prop, propBlock, propBlockParts, "some peer"); err != nil {
+		t.Fatal(err)
+	}
 
 	/*
 		Round2 (vs2, C) // B C C C // C C C _)
@@ -1178,15 +1186,24 @@ func TestStateLockPOLSafety2(t *testing.T) {
 
 	newProp.Signature = p.Signature
 
-	if err := cs1.SetProposalAndBlock(newProp, propBlock0, propBlockParts0, "some peer"); err != nil {
-		t.Fatal(err)
-	}
-
 	// Add the pol votes
 	addVotes(cs1, prevotes...)
 
 	ensureNewRound(newRoundCh, height, round)
 	t.Log("### ONTO Round 2")
+
+	// M0b: round-skip is now gated on an f+1 timeout quorum (or a bounded
+	// fallback timer) instead of firing synchronously off the local
+	// PrecommitWait timeout, so cs1.Round no longer necessarily reaches
+	// `round` right after ensureNewTimeout -- setting the proposal before
+	// ensureNewRound used to race defaultSetProposal's
+	// `proposal.Round != cs.Round` check (state.go) and previously won only
+	// because the old synchronous enterNewRound call left no window for the
+	// race to be lost. Waiting for ensureNewRound above removes the race
+	// (same fix as TestStateLockPOLRelock).
+	if err := cs1.SetProposalAndBlock(newProp, propBlock0, propBlockParts0, "some peer"); err != nil {
+		t.Fatal(err)
+	}
 	/*Round2
 	// now we see the polka from round 1, but we shouldn't unlock
 	*/

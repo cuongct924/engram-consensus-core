@@ -135,6 +135,17 @@ type State struct {
 
 	// offline state sync height indicating to which height the node synced offline
 	offlineStateSyncHeight int64
+
+	// timeoutSenders tracks, for the CURRENT height only, which distinct
+	// senders (peer IDs; "" for this node's own local timeout) have reported
+	// their PrecommitWait timer expiring for each round -- engram-sovereign-
+	// fsm's M0b (f+1-quorum round-skip, spec/core/EngramTendermint.tla's
+	// UponfPlusOneTimeoutsAny), replacing pure local-timer-driven round
+	// advancement. Reset on every height change alongside cs.Votes. Guarded
+	// by cs.mtx like the rest of State (handleTimeoutMessage and the
+	// RoundStepPrecommitWait case in handleTimeout are the only writers, both
+	// called with cs.mtx held).
+	timeoutSenders map[int32]map[p2p.ID]struct{}
 }
 
 // StateOption sets an optional parameter on the State.
@@ -165,6 +176,7 @@ func NewState(
 		evpool:           evpool,
 		evsw:             cmtevents.NewEventSwitch(),
 		metrics:          NopMetrics(),
+		timeoutSenders:   make(map[int32]map[p2p.ID]struct{}),
 	}
 	for _, option := range options {
 		option(cs)
@@ -729,6 +741,7 @@ func (cs *State) updateToState(state sm.State) {
 	}
 
 	cs.Validators = validators
+	cs.timeoutSenders = make(map[int32]map[p2p.ID]struct{}) // M0b: f+1-timeout tracking is per-height, like cs.Votes
 	cs.Proposal = nil
 	cs.ProposalBlock = nil
 	cs.ProposalBlockParts = nil
@@ -971,6 +984,9 @@ func (cs *State) handleMsg(mi msgInfo) {
 		// the peer is sending us CatchupCommit precommits.
 		// We could make note of this and help filter in broadcastHasVoteMessage().
 
+	case *TimeoutMessage:
+		cs.handleTimeoutMessage(msg, peerID)
+
 	case *ingestVerifiedBlockRequest:
 		cs.handleIngestVerifiedBlockRequest(msg)
 	default:
@@ -993,6 +1009,69 @@ func (cs *State) handleMsg(mi msgInfo) {
 			"msg_type", fmt.Sprintf("%T", msg),
 			"err", err,
 		)
+	}
+}
+
+// TimeoutCertInfo is the payload fired on types.EventTimeoutCert for the
+// Reactor to gossip as a TimeoutMessage (M0b).
+type TimeoutCertInfo struct {
+	Height int64
+	Round  int32
+}
+
+// broadcastTimeoutForRound is called from handleTimeout's
+// RoundStepPrecommitWait case (cs.mtx already held by the caller) -- it
+// registers this node's own timeout-for-round observation (a broadcaster's
+// message is visible to itself too, mirroring spec/core/EngramTendermint.tla's
+// shared msgs_timeout set) and fires the event the Reactor listens for to
+// gossip a TimeoutMessage to peers.
+func (cs *State) broadcastTimeoutForRound(height int64, round int32) {
+	cs.recordTimeoutSenderAndMaybeAdvance(height, round, "")
+	cs.evsw.FireEvent(types.EventTimeoutCert, TimeoutCertInfo{Height: height, Round: round})
+}
+
+// handleTimeoutMessage processes an incoming TimeoutMessage from a peer
+// (cs.mtx already held by the caller, via handleMsg).
+func (cs *State) handleTimeoutMessage(msg *TimeoutMessage, peerID p2p.ID) {
+	if msg.Height != cs.Height {
+		// Not our current height -- mirrors the spec's implicit per-height
+		// scoping of msgs_timeout (evidence from a different height carries
+		// no information here).
+		return
+	}
+	cs.recordTimeoutSenderAndMaybeAdvance(msg.Height, msg.Round, peerID)
+}
+
+// recordTimeoutSenderAndMaybeAdvance mirrors UponfPlusOneTimeoutsAny
+// (spec/core/EngramTendermint.tla:780-801): records src as having reported
+// round's timeout, and if round already has quorum (f+1 distinct senders)
+// evidence and is ahead of our current round, fast-forwards straight to it
+// -- not just round+1, matching the spec's StartRound(p, r) for whichever
+// specific round r reached quorum. Caller must hold cs.mtx.
+//
+// Voting power is not weighted here (unlike CometBFT's 2/3+ vote quorums) --
+// this prototype's genesis gives every validator equal power (see
+// engramd's `testnet init-files`), so a plain count of distinct senders is
+// exactly equivalent to a stake-weighted f+1 threshold for this deployment.
+// A production system with unequal stake would need TimeoutMessage to carry
+// a signed validator identity (like Vote does) so the threshold could be
+// computed on voting power instead of raw peer count.
+func (cs *State) recordTimeoutSenderAndMaybeAdvance(height int64, round int32, src p2p.ID) {
+	if cs.timeoutSenders[round] == nil {
+		cs.timeoutSenders[round] = make(map[p2p.ID]struct{})
+	}
+	cs.timeoutSenders[round][src] = struct{}{}
+
+	if round <= cs.Round {
+		return // no new information -- we're already at or past this round
+	}
+
+	f := (cs.Validators.Size() - 1) / 3 // N = 3f+1: f+1 distinct senders guarantees at least one honest one
+	threshold1 := f + 1
+	if len(cs.timeoutSenders[round]) >= threshold1 {
+		cs.Logger.Info("f+1 timeout quorum reached, fast-forwarding round",
+			"height", height, "from_round", cs.Round, "to_round", round, "senders", len(cs.timeoutSenders[round]))
+		cs.enterNewRound(height, round)
 	}
 }
 
@@ -1039,7 +1118,47 @@ func (cs *State) handleTimeout(ti timeoutInfo, rs cstypes.RoundState) {
 
 		cs.emitPrecommitTimeoutMetrics(ti.Round)
 		cs.enterPrecommit(ti.Height, ti.Round)
-		cs.enterNewRound(ti.Height, ti.Round+1)
+		// M0b: round-skip now requires f+1-quorum evidence (HotStuff/Jolteon-
+		// style "broadcast timeout, advance on f+1 received"), not a bare
+		// local timeout. We broadcast for ti.Round+1 (the round being
+		// REQUESTED), not ti.Round (our current round) -- if every honest
+		// validator instead broadcast its own current round, nobody's
+		// message would ever satisfy "round > my round" (everyone times out
+		// at roughly the same round simultaneously), and the network would
+		// never advance; requesting round+1 makes every honest broadcaster's
+		// own message immediately count toward its own quorum tally too, per
+		// broadcastTimeoutForRound's doc. (This is a deliberate adaptation of
+		// spec/core/EngramTendermint.tla's UponfPlusOneTimeoutsAny, which
+		// broadcasts for round[p] and relies on r > round[p] strictly --
+		// that reading only produces catch-up for a lagging node, not a
+		// first advance when all honest nodes time out together; found by
+		// this exact scenario deadlocking TestReactorInvalidPrecommit.)
+		cs.broadcastTimeoutForRound(ti.Height, ti.Round+1)
+
+		// Schedule a bounded fallback: if no f+1 quorum arrives, force the
+		// advance unconditionally, like pre-M0b vanilla CometBFT did. This
+		// is required for liveness whenever f+1 peer broadcasts can never
+		// arrive: a single-validator chain (f+1=1, satisfied by our own vote
+		// alone) rarely needs it, but a bare *State under test with no live
+		// Reactor/Switch wired up (many of CometBFT's own unit tests, e.g.
+		// TestStateProposerSelection2, construct State in isolation and feed
+		// it votes/timeouts directly) has no way to ever produce a real peer
+		// broadcast and would otherwise deadlock forever. Uses a distinct
+		// step (RoundStepPrecommitWaitFallback) rather than rescheduling
+		// RoundStepPrecommitWait itself, because consensus/ticker.go's
+		// timeoutRoutine silently discards any new timeout that doesn't
+		// strictly increase the step within the same (height, round) --
+		// found by this exact scenario making the fallback never fire.
+		cs.scheduleTimeout(cs.config.Precommit(ti.Round), ti.Height, ti.Round, cstypes.RoundStepPrecommitWaitFallback)
+
+	case cstypes.RoundStepPrecommitWaitFallback:
+		if ti.Round >= cs.Round {
+			cs.Logger.Info("f+1 timeout quorum not reached in time, forcing round advance (M0b fallback)",
+				"height", ti.Height, "round", ti.Round)
+			cs.enterNewRound(ti.Height, ti.Round+1)
+		}
+		// else: the quorum fast path already advanced us past ti.Round (or
+		// beyond) before this fired -- nothing to do.
 
 	default:
 		panic(cmterrors.ErrInvalidField{Field: "timeout_step"})

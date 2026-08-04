@@ -83,6 +83,16 @@ message VoteSetBits {
   tendermint.libs.bits.BitArray votes = 5 [(gogoproto.nullable) = false];
 }
 
+// Timeout is broadcast when a validator's local round timer expires,
+// enabling f+1-quorum round-skip (engram-sovereign-fsm's M0b: mirrors
+// spec/core/EngramTendermint.tla's BroadcastTimeout/UponfPlusOneTimeoutsAny)
+// instead of purely local-timer-driven round advancement. See
+// consensus/state.go's handleTimeoutMessage for the quorum-counting side.
+message Timeout {
+  int64 height = 1;
+  int32 round = 2;
+}
+
 message Message {
   oneof sum {
     NewRoundStep new_round_step = 1;
@@ -94,5 +104,6 @@ message Message {
     HasVote has_vote = 7;
     VoteSetMaj23 vote_set_maj23 = 8;
     VoteSetBits vote_set_bits = 9;
+    Timeout timeout = 10;
   }
 }

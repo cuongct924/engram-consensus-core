@@ -18,6 +18,7 @@ var (
 	_ p2p.Wrapper = &NewRoundStep{}
 	_ p2p.Wrapper = &HasVote{}
 	_ p2p.Wrapper = &BlockPart{}
+	_ p2p.Wrapper = &Timeout{}
 )
 
 func (m *VoteSetBits) Wrap() proto.Message {
@@ -74,6 +75,20 @@ func (m *NewRoundStep) Wrap() proto.Message {
 	return cm
 }
 
+// Wrap implements p2p.Wrapper (M0b) -- without this, the p2p layer sends
+// Timeout's raw, unwrapped bytes on StateChannel; the receiver always
+// decodes incoming bytes as *Message (see the channel's MessageType:
+// &cmtcons.Message{} descriptor), so Timeout's own field 1 (height, a
+// varint) gets misread as Message's field 1 (new_round_step, which expects
+// an embedded message) -- this is the exact "wrong wireType = 0 for field
+// NewRoundStep" error that was found deadlocking TestReactorInvalidPrecommit
+// before this fix.
+func (m *Timeout) Wrap() proto.Message {
+	cm := &Message{}
+	cm.Sum = &Message_Timeout{Timeout: m}
+	return cm
+}
+
 // Unwrap implements the p2p Wrapper interface and unwraps a wrapped consensus
 // proto message.
 func (m *Message) Unwrap() (proto.Message, error) {
@@ -104,6 +119,9 @@ func (m *Message) Unwrap() (proto.Message, error) {
 
 	case *Message_VoteSetBits:
 		return m.GetVoteSetBits(), nil
+
+	case *Message_Timeout:
+		return m.GetTimeout(), nil
 
 	default:
 		return nil, fmt.Errorf("unknown message: %T", msg)

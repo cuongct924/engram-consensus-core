@@ -35,6 +35,11 @@ type Switch struct {
 
 	metrics *p2p.Metrics
 
+	// healthMonitor tracks per-peer connection metadata for
+	// PeerHealthSnapshot -- see health_monitor.go's package doc for what
+	// this feeds (engram-sovereign-fsm's P2P sensor).
+	healthMonitor *HealthMonitor
+
 	// active is used to track if the switch has started
 	// BaseService has similar field, but it triggered BEFORE OnStart().
 	// This leads to concurrent peers provisioning between bootstrapping peers and accepting incoming messages
@@ -69,6 +74,11 @@ func NewSwitch(
 		peerSet: NewPeerSet(host, metrics, logger),
 
 		metrics: metrics,
+
+		// Default churn window of 1h -- mirrors the spec's informal "per
+		// epoch" framing for peer_churn_rate; anchor peers start empty and
+		// are configured via SetAnchorPeers once bootstrap peers are known.
+		healthMonitor: NewHealthMonitor(nil, time.Hour),
 
 		active: atomic.Bool{},
 	}
@@ -205,6 +215,13 @@ func (s *Switch) Peers() p2p.IPeerSet {
 	return s.peerSet
 }
 
+// PeerHealthSnapshot computes the current P2P health telemetry from real
+// libp2p connection data -- see health_monitor.go's HealthSnapshot doc for
+// which spec/core/EngramFSM.tla predicate each field feeds.
+func (s *Switch) PeerHealthSnapshot() HealthSnapshot {
+	return s.healthMonitor.Snapshot(s.peerSet.Copy())
+}
+
 func (s *Switch) NumPeers() (outbound, inbound, dialing int) {
 	for _, c := range s.host.Network().Conns() {
 		switch c.Stat().Direction {
@@ -244,6 +261,24 @@ func (s *Switch) DialPeersAsync(peers []string) error {
 	return nil
 }
 
+// onPeerConnected wraps s.reactors.AddPeer with the health-monitor hook so
+// every PeerAddOptions.OnAfterStart site feeds real telemetry (see
+// health_monitor.go) in addition to notifying reactors.
+func (s *Switch) onPeerConnected(p *Peer) {
+	s.reactors.AddPeer(p)
+	s.healthMonitor.OnPeerConnected(p)
+}
+
+// onPeerDisconnected wraps s.reactors.RemovePeer with the health-monitor
+// hook for PeerRemovalOptions.OnAfterStop sites -- a peer that reaches this
+// hook was actually connected, unlike PeerAddOptions.OnStartFailed (which
+// fires for a peer that never finished connecting and is intentionally left
+// unwrapped, since it shouldn't count toward churn/tenure).
+func (s *Switch) onPeerDisconnected(p *Peer, reason any) {
+	s.reactors.RemovePeer(p, reason)
+	s.healthMonitor.OnPeerDisconnected(p, reason)
+}
+
 func (s *Switch) StopPeerGracefully(_ p2p.Peer) {
 	// used only by PEX
 	s.logUnimplemented("StopPeerGracefully")
@@ -260,7 +295,7 @@ func (s *Switch) StopPeerForError(peer p2p.Peer, reason any) {
 
 	removalOpts := PeerRemovalOptions{
 		Reason:      reason,
-		OnAfterStop: s.reactors.RemovePeer,
+		OnAfterStop: s.onPeerDisconnected,
 	}
 
 	if err := s.peerSet.Remove(pid, removalOpts); err != nil {
@@ -295,7 +330,7 @@ func (s *Switch) StopPeerForError(peer p2p.Peer, reason any) {
 		Unconditional: p.IsUnconditional(),
 		Private:       p.IsPrivate(),
 		OnBeforeStart: s.reactors.InitPeer,
-		OnAfterStart:  s.reactors.AddPeer,
+		OnAfterStart:  s.onPeerConnected,
 		OnStartFailed: s.reactors.RemovePeer,
 	})
 }
@@ -502,7 +537,7 @@ func (s *Switch) resolvePeer(id peer.ID, connRemoteAddr ma.Multiaddr) (p2p.Peer,
 		Persistent:    isPersistent,
 		Unconditional: isUnconditional,
 		OnBeforeStart: s.reactors.InitPeer,
-		OnAfterStart:  s.reactors.AddPeer,
+		OnAfterStart:  s.onPeerConnected,
 		OnStartFailed: s.reactors.RemovePeer,
 	}
 
@@ -529,7 +564,7 @@ func (s *Switch) bootstrapPeerOpts(bp BootstrapPeer) PeerAddOptions {
 		Persistent:    bp.Persistent,
 		Unconditional: bp.Unconditional,
 		OnBeforeStart: s.reactors.InitPeer,
-		OnAfterStart:  s.reactors.AddPeer,
+		OnAfterStart:  s.onPeerConnected,
 		OnStartFailed: s.reactors.RemovePeer,
 	}
 }
