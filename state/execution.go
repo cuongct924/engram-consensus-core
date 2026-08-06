@@ -123,6 +123,7 @@ func (blockExec *BlockExecutor) SetEventBus(eventBus types.BlockEventPublisher) 
 func (blockExec *BlockExecutor) CreateProposalBlock(
 	ctx context.Context,
 	height int64,
+	round int32,
 	state State,
 	lastExtCommit *types.ExtendedCommit,
 	proposerAddr []byte,
@@ -161,6 +162,7 @@ func (blockExec *BlockExecutor) CreateProposalBlock(
 			Time:               block.Time,
 			NextValidatorsHash: block.NextValidatorsHash,
 			ProposerAddress:    block.ProposerAddress,
+			Round:              round,
 		},
 	)
 	if err != nil {
@@ -185,6 +187,7 @@ func (blockExec *BlockExecutor) CreateProposalBlock(
 
 func (blockExec *BlockExecutor) ProcessProposal(
 	block *types.Block,
+	round int32,
 	state State,
 ) (bool, error) {
 	resp, err := blockExec.proxyApp.ProcessProposal(context.TODO(), &abci.RequestProcessProposal{
@@ -196,6 +199,7 @@ func (blockExec *BlockExecutor) ProcessProposal(
 		Misbehavior:        block.Evidence.Evidence.ToABCI(),
 		ProposerAddress:    block.ProposerAddress,
 		NextValidatorsHash: block.NextValidatorsHash,
+		Round:              round,
 	})
 	if err != nil {
 		return false, err

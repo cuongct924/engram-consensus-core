@@ -155,6 +155,13 @@ message RequestPrepareProposal {
   bytes next_validators_hash = 7;
   // address of the public key of the validator proposing the block.
   bytes proposer_address = 8;
+  // round is the consensus round this proposal is being built for
+  // (engram-sovereign-fsm's Phase 7 addition -- vanilla ABCI 2.0 does not
+  // expose this; see consensus/state.go's CreateProposalBlock caller, which
+  // threads cs.Round through). Needed so the app can apply round-dependent
+  // tolerance widening (e.g. spec/core/EngramTendermint.tla's BTCTolerance)
+  // instead of assuming round 0 always.
+  int32 round = 9;
 }
 
 message RequestProcessProposal {
@@ -171,6 +178,9 @@ message RequestProcessProposal {
   bytes next_validators_hash = 7;
   // address of the public key of the original proposer of the block.
   bytes proposer_address = 8;
+  // round is the consensus round this proposal was built for -- see
+  // RequestPrepareProposal.round's doc.
+  int32 round = 9;
 }
 
 // Extends a vote with application-injected data

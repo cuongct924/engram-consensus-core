@@ -133,3 +133,26 @@ func (sc *SignerClient) SignProposal(chainID string, proposal *cmtproto.Proposal
 
 	return nil
 }
+
+// SignTimeout requests a remote signer to sign a Timeout attestation (M0b
+// f+1-quorum round-skip, see types.Timeout's doc).
+func (sc *SignerClient) SignTimeout(chainID string, timeout *cmtproto.Timeout) error {
+	response, err := sc.endpoint.SendRequest(mustWrapMsg(
+		&privvalproto.SignTimeoutRequest{Timeout: timeout, ChainId: chainID},
+	))
+	if err != nil {
+		return err
+	}
+
+	resp := response.GetSignedTimeoutResponse()
+	if resp == nil {
+		return cmterrors.ErrRequiredField{Field: "response"}
+	}
+	if resp.Error != nil {
+		return &RemoteSignerError{Code: int(resp.Error.Code), Description: resp.Error.Description}
+	}
+
+	*timeout = resp.Timeout
+
+	return nil
+}

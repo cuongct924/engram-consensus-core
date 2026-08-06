@@ -118,3 +118,21 @@ func (sc *RetrySignerClient) SignProposal(chainID string, proposal *cmtproto.Pro
 	}
 	return fmt.Errorf("exhausted all attempts to sign proposal: %w", err)
 }
+
+func (sc *RetrySignerClient) SignTimeout(chainID string, timeout *cmtproto.Timeout) error {
+	var err error
+	for i := 0; i < sc.retries || sc.retries == 0; i++ {
+		err = sc.next.SignTimeout(chainID, timeout)
+		if err == nil {
+			return nil
+		}
+		// If remote signer errors, we don't retry.
+		if _, ok := err.(*RemoteSignerError); ok {
+			return err
+		}
+		if !sc.sleep() {
+			return fmt.Errorf("aborted signing timeout: %w", err)
+		}
+	}
+	return fmt.Errorf("exhausted all attempts to sign timeout: %w", err)
+}

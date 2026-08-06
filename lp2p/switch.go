@@ -130,6 +130,17 @@ func (s *Switch) OnStart() error {
 	bootstrapPeers := s.host.BootstrapPeers()
 	s.Logger.Info("Connecting to bootstrap peers", "count", len(bootstrapPeers))
 
+	// Designate the resolved bootstrap/persistent peer set as anchors for
+	// health telemetry (see health_monitor.go's SetAnchorPeers doc) -- must
+	// happen before dialing below so PeerHealthSnapshot() never observes a
+	// window where real bootstrap peers are connected but ActiveAnchors is
+	// still 0.
+	anchorIDs := make([]peer.ID, 0, len(bootstrapPeers))
+	for id := range bootstrapPeers {
+		anchorIDs = append(anchorIDs, id)
+	}
+	s.healthMonitor.SetAnchorPeers(anchorIDs)
+
 	var wg sync.WaitGroup
 
 	for _, bp := range bootstrapPeers {

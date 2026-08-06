@@ -88,6 +88,27 @@ func DefaultValidationRequestHandler(
 		} else {
 			res = mustWrapMsg(&privvalproto.SignedProposalResponse{Proposal: *proposal, Error: nil})
 		}
+	case *privvalproto.Message_SignTimeoutRequest:
+		if r.SignTimeoutRequest.GetChainId() != chainID {
+			res = mustWrapMsg(&privvalproto.SignedTimeoutResponse{
+				Timeout: cmtproto.Timeout{}, Error: &privvalproto.RemoteSignerError{
+					Code: 0, Description: "unable to sign timeout",
+				},
+			})
+			return res, fmt.Errorf("want chainID: %s, got chainID: %s", r.SignTimeoutRequest.GetChainId(), chainID)
+		}
+
+		timeout := r.SignTimeoutRequest.Timeout
+
+		err = privVal.SignTimeout(chainID, timeout)
+		if err != nil {
+			res = mustWrapMsg(&privvalproto.SignedTimeoutResponse{
+				Timeout: cmtproto.Timeout{}, Error: &privvalproto.RemoteSignerError{Code: 0, Description: err.Error()},
+			})
+		} else {
+			res = mustWrapMsg(&privvalproto.SignedTimeoutResponse{Timeout: *timeout, Error: nil})
+		}
+
 	case *privvalproto.Message_PingRequest:
 		err, res = nil, mustWrapMsg(&privvalproto.PingResponse{})
 

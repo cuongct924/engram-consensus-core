@@ -17,6 +17,9 @@ type PrivValidator interface {
 
 	SignVote(chainID string, vote *cmtproto.Vote) error
 	SignProposal(chainID string, proposal *cmtproto.Proposal) error
+	// SignTimeout signs a Timeout attestation (M0b f+1-quorum round-skip, see
+	// Timeout's doc in timeout.go) in place, mutating timeout.Signature.
+	SignTimeout(chainID string, timeout *cmtproto.Timeout) error
 }
 
 type PrivValidatorsByAddress []PrivValidator
@@ -111,6 +114,17 @@ func (pv MockPV) SignProposal(chainID string, proposal *cmtproto.Proposal) error
 		return err
 	}
 	proposal.Signature = sig
+	return nil
+}
+
+// SignTimeout implements PrivValidator.
+func (pv MockPV) SignTimeout(chainID string, timeout *cmtproto.Timeout) error {
+	signBytes := TimeoutSignBytes(chainID, timeout.Height, timeout.Round)
+	sig, err := pv.PrivKey.Sign(signBytes)
+	if err != nil {
+		return err
+	}
+	timeout.Signature = sig
 	return nil
 }
 

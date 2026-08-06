@@ -86,8 +86,7 @@ func MsgToProto(msg Message) (proto.Message, error) {
 
 	case *TimeoutMessage:
 		pb = &cmtcons.Timeout{
-			Height: msg.Height,
-			Round:  msg.Round,
+			Timeout: msg.Timeout.ToProto(),
 		}
 
 	case *VoteSetMaj23Message:
@@ -206,9 +205,12 @@ func MsgFromProto(p proto.Message) (Message, error) {
 			Index:  msg.Index,
 		}
 	case *cmtcons.Timeout:
+		timeout, err := types.TimeoutFromProto(msg.Timeout)
+		if err != nil {
+			return nil, cmterrors.ErrMsgToProto{MessageName: "Timeout", Err: err}
+		}
 		pb = &TimeoutMessage{
-			Height: msg.Height,
-			Round:  msg.Round,
+			Timeout: timeout,
 		}
 	case *cmtcons.VoteSetMaj23:
 		bi, err := types.BlockIDFromProto(&msg.BlockID)

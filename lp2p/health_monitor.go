@@ -88,6 +88,27 @@ func (h *HealthMonitor) Blacklist(id peer.ID) {
 	h.blacklistPeers[id] = true
 }
 
+// SetAnchorPeers replaces the anchor peer set wholesale -- this is the
+// method NewSwitch's own doc comment promised ("anchor peers start empty
+// and are configured via SetAnchorPeers once bootstrap peers are known")
+// but that was never actually implemented, leaving ActiveAnchors
+// permanently 0 regardless of real peer connectivity (Switch.OnStart's
+// bootstrapPeers were computed but never fed here). Called once from
+// Switch.OnStart with the resolved bootstrap/persistent peer set -- the
+// same peers this repo's IsCriticalCondition (via engram-sovereign-fsm's
+// spec/core/EngramFSM.tla-derived Cardinality(ActiveAnchors) = 0 check)
+// needs to see at least one of connected to avoid an Eclipse-attack false
+// positive.
+func (h *HealthMonitor) SetAnchorPeers(ids []peer.ID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	anchors := make(map[peer.ID]bool, len(ids))
+	for _, id := range ids {
+		anchors[id] = true
+	}
+	h.anchorPeers = anchors
+}
+
 // Snapshot computes a HealthSnapshot from the currently-connected peer set
 // (as returned by PeerSet.Copy()), mirroring ActiveAnchors/CleanPeers/
 // SubnetDiversity's definitions (spec/core/EngramFSM.tla:66-73). Peers that

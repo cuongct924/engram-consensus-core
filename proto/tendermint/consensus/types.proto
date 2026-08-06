@@ -86,11 +86,13 @@ message VoteSetBits {
 // Timeout is broadcast when a validator's local round timer expires,
 // enabling f+1-quorum round-skip (engram-sovereign-fsm's M0b: mirrors
 // spec/core/EngramTendermint.tla's BroadcastTimeout/UponfPlusOneTimeoutsAny)
-// instead of purely local-timer-driven round advancement. See
-// consensus/state.go's handleTimeoutMessage for the quorum-counting side.
+// instead of purely local-timer-driven round advancement. Wraps the signed
+// tendermint.types.Timeout (like Vote/Proposal above wrap their core types)
+// so recipients can verify it against the validator set instead of trusting
+// the sending peer's raw p2p identity -- see consensus/state.go's
+// handleTimeoutMessage for the verify-then-count quorum side.
 message Timeout {
-  int64 height = 1;
-  int32 round = 2;
+  tendermint.types.Timeout timeout = 1;
 }
 
 message Message {

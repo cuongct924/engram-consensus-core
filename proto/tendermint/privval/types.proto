@@ -56,6 +56,19 @@ message SignedProposalResponse {
   RemoteSignerError error = 2;
 }
 
+// SignTimeoutRequest is a request to sign a Timeout (engram-sovereign-fsm's
+// M0b f+1-quorum round-skip attestation, see tendermint.types.Timeout's doc).
+message SignTimeoutRequest {
+  tendermint.types.Timeout timeout = 1;
+  string chain_id = 2;
+}
+
+// SignedTimeoutResponse is a response containing a signed Timeout or an error.
+message SignedTimeoutResponse {
+  tendermint.types.Timeout timeout = 1 [(gogoproto.nullable) = false];
+  RemoteSignerError error = 2;
+}
+
 // PingRequest is a request to confirm that the connection is alive.
 message PingRequest {}
 
@@ -72,5 +85,7 @@ message Message {
     SignedProposalResponse signed_proposal_response = 6;
     PingRequest ping_request = 7;
     PingResponse ping_response = 8;
+    SignTimeoutRequest sign_timeout_request = 9;
+    SignedTimeoutResponse signed_timeout_response = 10;
   }
 }

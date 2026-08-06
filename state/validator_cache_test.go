@@ -57,7 +57,7 @@ func TestValidatorCacheHitWithinBlockCycle(t *testing.T) {
 	require.NoError(t, err)
 
 	// ProcessProposal: first operation in the block cycle (cache miss → 1 DB load).
-	_, err = blockExec.ProcessProposal(block, state)
+	_, err = blockExec.ProcessProposal(block, 0, state)
 	require.NoError(t, err)
 
 	// ExtendVote: second operation in the same cycle (cache hit → no additional DB load).
@@ -100,7 +100,7 @@ func TestValidatorCacheInvalidatesOnNewHeight(t *testing.T) {
 	// Block cycle 1: block at height 3, loads validators at height 2 (cache miss).
 	block1, err := makeBlock(state, 3, oneValCommit(state.LastBlockHeight))
 	require.NoError(t, err)
-	_, err = blockExec.ProcessProposal(block1, state)
+	_, err = blockExec.ProcessProposal(block1, 0, state)
 	require.NoError(t, err)
 
 	// Block cycle 2: block at height 4, must load validators at height 3 (cache miss).
@@ -109,7 +109,7 @@ func TestValidatorCacheInvalidatesOnNewHeight(t *testing.T) {
 	state2.LastBlockHeight = 3
 	block2, err := makeBlock(state2, 4, oneValCommit(3))
 	require.NoError(t, err)
-	_, err = blockExec.ProcessProposal(block2, state2)
+	_, err = blockExec.ProcessProposal(block2, 0, state2)
 	require.NoError(t, err)
 
 	storeMock.AssertNumberOfCalls(t, "LoadValidators", 2)
@@ -148,11 +148,11 @@ func TestValidatorCacheHitAcrossProposalAndProcess(t *testing.T) {
 	require.NoError(t, err)
 
 	// CreateProposalBlock: cache miss → 1 DB load.
-	block, err := blockExec.CreateProposalBlock(t.Context(), state.LastBlockHeight+1, state, lastExtCommit, proposerAddr)
+	block, err := blockExec.CreateProposalBlock(t.Context(), state.LastBlockHeight+1, 0, state, lastExtCommit, proposerAddr)
 	require.NoError(t, err)
 
 	// ProcessProposal: same height validators → cache hit, no additional DB load.
-	_, err = blockExec.ProcessProposal(block, state)
+	_, err = blockExec.ProcessProposal(block, 0, state)
 	require.NoError(t, err)
 
 	storeMock.AssertNumberOfCalls(t, "LoadValidators", 1)

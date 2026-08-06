@@ -444,7 +444,7 @@ func TestProcessProposal(t *testing.T) {
 		ProposerAddress:    block1.ProposerAddress,
 	}
 
-	acceptBlock, err := blockExec.ProcessProposal(block1, state)
+	acceptBlock, err := blockExec.ProcessProposal(block1, 0, state)
 	require.NoError(t, err)
 	require.True(t, acceptBlock)
 	app.AssertExpectations(t)
@@ -752,7 +752,7 @@ func TestEmptyPrepareProposal(t *testing.T) {
 	pa, _ := state.Validators.GetByIndex(0)
 	commit, _, err := makeValidCommit(height, types.BlockID{}, state.Validators, privVals)
 	require.NoError(t, err)
-	_, err = blockExec.CreateProposalBlock(ctx, height, state, commit, pa)
+	_, err = blockExec.CreateProposalBlock(ctx, height, 0, state, commit, pa)
 	require.NoError(t, err)
 }
 
@@ -796,7 +796,7 @@ func TestPrepareProposalTxsAllIncluded(t *testing.T) {
 	pa, _ := state.Validators.GetByIndex(0)
 	commit, _, err := makeValidCommit(height, types.BlockID{}, state.Validators, privVals)
 	require.NoError(t, err)
-	block, err := blockExec.CreateProposalBlock(ctx, height, state, commit, pa)
+	block, err := blockExec.CreateProposalBlock(ctx, height, 0, state, commit, pa)
 	require.NoError(t, err)
 
 	for i, tx := range block.Txs {
@@ -850,7 +850,7 @@ func TestPrepareProposalReorderTxs(t *testing.T) {
 	pa, _ := state.Validators.GetByIndex(0)
 	commit, _, err := makeValidCommit(height, types.BlockID{}, state.Validators, privVals)
 	require.NoError(t, err)
-	block, err := blockExec.CreateProposalBlock(ctx, height, state, commit, pa)
+	block, err := blockExec.CreateProposalBlock(ctx, height, 0, state, commit, pa)
 	require.NoError(t, err)
 	for i, tx := range block.Txs {
 		require.Equal(t, txs[i], tx)
@@ -905,7 +905,7 @@ func TestPrepareProposalErrorOnTooManyTxs(t *testing.T) {
 	pa, _ := state.Validators.GetByIndex(0)
 	commit, _, err := makeValidCommit(height, types.BlockID{}, state.Validators, privVals)
 	require.NoError(t, err)
-	block, err := blockExec.CreateProposalBlock(ctx, height, state, commit, pa)
+	block, err := blockExec.CreateProposalBlock(ctx, height, 0, state, commit, pa)
 	require.Nil(t, block)
 	require.ErrorContains(t, err, "transaction data size exceeds maximum")
 
@@ -961,7 +961,7 @@ func TestPrepareProposalCountSerializationOverhead(t *testing.T) {
 	pa, _ := state.Validators.GetByIndex(0)
 	commit, _, err := makeValidCommit(height, types.BlockID{}, state.Validators, privVals)
 	require.NoError(t, err)
-	block, err := blockExec.CreateProposalBlock(ctx, height, state, commit, pa)
+	block, err := blockExec.CreateProposalBlock(ctx, height, 0, state, commit, pa)
 	require.Nil(t, block)
 	require.ErrorContains(t, err, "transaction data size exceeds maximum")
 
@@ -1011,7 +1011,7 @@ func TestPrepareProposalErrorOnPrepareProposalError(t *testing.T) {
 	pa, _ := state.Validators.GetByIndex(0)
 	commit, _, err := makeValidCommit(height, types.BlockID{}, state.Validators, privVals)
 	require.NoError(t, err)
-	block, err := blockExec.CreateProposalBlock(ctx, height, state, commit, pa)
+	block, err := blockExec.CreateProposalBlock(ctx, height, 0, state, commit, pa)
 	require.Nil(t, block)
 	require.ErrorContains(t, err, "an injected error")
 
@@ -1107,11 +1107,11 @@ func TestCreateProposalAbsentVoteExtensions(t *testing.T) {
 			stripSignatures(lastCommit)
 			if testCase.expectPanic {
 				require.Panics(t, func() {
-					_, err := blockExec.CreateProposalBlock(ctx, testCase.height, state, lastCommit, pa)
+					_, err := blockExec.CreateProposalBlock(ctx, testCase.height, 0, state, lastCommit, pa)
 					require.NoError(t, err)
 				})
 			} else {
-				_, err = blockExec.CreateProposalBlock(ctx, testCase.height, state, lastCommit, pa)
+				_, err = blockExec.CreateProposalBlock(ctx, testCase.height, 0, state, lastCommit, pa)
 				require.NoError(t, err)
 			}
 		})

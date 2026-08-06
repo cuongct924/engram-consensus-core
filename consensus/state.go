@@ -137,15 +137,19 @@ type State struct {
 	offlineStateSyncHeight int64
 
 	// timeoutSenders tracks, for the CURRENT height only, which distinct
-	// senders (peer IDs; "" for this node's own local timeout) have reported
-	// their PrecommitWait timer expiring for each round -- engram-sovereign-
-	// fsm's M0b (f+1-quorum round-skip, spec/core/EngramTendermint.tla's
-	// UponfPlusOneTimeoutsAny), replacing pure local-timer-driven round
-	// advancement. Reset on every height change alongside cs.Votes. Guarded
-	// by cs.mtx like the rest of State (handleTimeoutMessage and the
-	// RoundStepPrecommitWait case in handleTimeout are the only writers, both
-	// called with cs.mtx held).
-	timeoutSenders map[int32]map[p2p.ID]struct{}
+	// validators (keyed by ValidatorAddress, "" for this node's own local
+	// timeout when unsigned -- see recordTimeoutSenderAndMaybeAdvance) have
+	// reported their PrecommitWait timer expiring for each round --
+	// engram-sovereign-fsm's M0b (f+1-quorum round-skip, spec/core/
+	// EngramTendermint.tla's UponfPlusOneTimeoutsAny), replacing pure
+	// local-timer-driven round advancement. Keyed by validator address
+	// (verified signature), NOT raw p2p peer identity -- see
+	// recordTimeoutSenderAndMaybeAdvance's doc for why that distinction is a
+	// real safety requirement, not a style choice. Reset on every height
+	// change alongside cs.Votes. Guarded by cs.mtx like the rest of State
+	// (handleTimeoutMessage and the RoundStepPrecommitWait case in
+	// handleTimeout are the only writers, both called with cs.mtx held).
+	timeoutSenders map[int32]map[string]struct{}
 }
 
 // StateOption sets an optional parameter on the State.
@@ -176,7 +180,7 @@ func NewState(
 		evpool:           evpool,
 		evsw:             cmtevents.NewEventSwitch(),
 		metrics:          NopMetrics(),
-		timeoutSenders:   make(map[int32]map[p2p.ID]struct{}),
+		timeoutSenders:   make(map[int32]map[string]struct{}),
 	}
 	for _, option := range options {
 		option(cs)
@@ -741,7 +745,7 @@ func (cs *State) updateToState(state sm.State) {
 	}
 
 	cs.Validators = validators
-	cs.timeoutSenders = make(map[int32]map[p2p.ID]struct{}) // M0b: f+1-timeout tracking is per-height, like cs.Votes
+	cs.timeoutSenders = make(map[int32]map[string]struct{}) // M0b: f+1-timeout tracking is per-height, like cs.Votes
 	cs.Proposal = nil
 	cs.ProposalBlock = nil
 	cs.ProposalBlockParts = nil
@@ -1015,62 +1019,124 @@ func (cs *State) handleMsg(mi msgInfo) {
 // TimeoutCertInfo is the payload fired on types.EventTimeoutCert for the
 // Reactor to gossip as a TimeoutMessage (M0b).
 type TimeoutCertInfo struct {
-	Height int64
-	Round  int32
+	Timeout *types.Timeout
 }
 
 // broadcastTimeoutForRound is called from handleTimeout's
 // RoundStepPrecommitWait case (cs.mtx already held by the caller) -- it
-// registers this node's own timeout-for-round observation (a broadcaster's
+// signs this node's own timeout-for-round attestation (a broadcaster's
 // message is visible to itself too, mirroring spec/core/EngramTendermint.tla's
-// shared msgs_timeout set) and fires the event the Reactor listens for to
-// gossip a TimeoutMessage to peers.
+// shared msgs_timeout set), records it toward its own quorum tally, and
+// fires the event the Reactor listens for to gossip the signed Timeout to
+// peers.
+//
+// Signing (rather than broadcasting bare height/round) is load-bearing: see
+// recordTimeoutSenderAndMaybeAdvance's doc for why an unauthenticated count
+// of p2p senders would let any connected peer -- not necessarily a
+// validator -- forge a fake f+1 quorum.
 func (cs *State) broadcastTimeoutForRound(height int64, round int32) {
-	cs.recordTimeoutSenderAndMaybeAdvance(height, round, "")
-	cs.evsw.FireEvent(types.EventTimeoutCert, TimeoutCertInfo{Height: height, Round: round})
+	if cs.privValidator == nil || cs.privValidatorPubKey == nil {
+		// Not a validator (or, in tests, a byzantine node that has
+		// deliberately disabled its own signer, e.g. invalid_test.go's
+		// invalidDoPrevoteFunc) -- same as the other cs.privValidator == nil
+		// guards in this file (signVote et al.), just skip.
+		return
+	}
+	addr := cs.privValidatorPubKey.Address()
+	valIdx, _ := cs.Validators.GetByAddress(addr)
+
+	timeout := &cmtproto.Timeout{
+		Height:           height,
+		Round:            round,
+		ValidatorAddress: addr,
+		ValidatorIndex:   valIdx,
+	}
+	if err := cs.privValidator.SignTimeout(cs.state.ChainID, timeout); err != nil {
+		cs.Logger.Error("broadcastTimeoutForRound: failed to sign timeout", "err", err)
+		return
+	}
+	signed, err := types.TimeoutFromProto(timeout)
+	if err != nil {
+		cs.Logger.Error("broadcastTimeoutForRound: failed to convert signed timeout", "err", err)
+		return
+	}
+
+	cs.recordTimeoutSenderAndMaybeAdvance(height, round, signed)
+	cs.evsw.FireEvent(types.EventTimeoutCert, TimeoutCertInfo{Timeout: signed})
 }
 
 // handleTimeoutMessage processes an incoming TimeoutMessage from a peer
-// (cs.mtx already held by the caller, via handleMsg).
+// (cs.mtx already held by the caller, via handleMsg). The peer's raw p2p
+// identity (peerID) is deliberately NOT used for quorum accounting -- see
+// recordTimeoutSenderAndMaybeAdvance's doc; peerID is only meaningful here
+// for the log line.
 func (cs *State) handleTimeoutMessage(msg *TimeoutMessage, peerID p2p.ID) {
-	if msg.Height != cs.Height {
+	timeout := msg.Timeout
+	if timeout.Height != cs.Height {
 		// Not our current height -- mirrors the spec's implicit per-height
 		// scoping of msgs_timeout (evidence from a different height carries
 		// no information here).
 		return
 	}
-	cs.recordTimeoutSenderAndMaybeAdvance(msg.Height, msg.Round, peerID)
+
+	valIdx, val := cs.Validators.GetByAddress(timeout.ValidatorAddress)
+	if val == nil {
+		cs.Logger.Error("handleTimeoutMessage: unknown validator, dropping",
+			"peer", peerID, "height", timeout.Height, "round", timeout.Round, "val_index", timeout.ValidatorIndex)
+		return
+	}
+	if err := timeout.Verify(cs.state.ChainID, val.PubKey); err != nil {
+		cs.Logger.Error("handleTimeoutMessage: invalid signature, dropping",
+			"peer", peerID, "height", timeout.Height, "round", timeout.Round, "val_index", valIdx, "err", err)
+		return
+	}
+
+	cs.recordTimeoutSenderAndMaybeAdvance(timeout.Height, timeout.Round, timeout)
 }
 
 // recordTimeoutSenderAndMaybeAdvance mirrors UponfPlusOneTimeoutsAny
-// (spec/core/EngramTendermint.tla:780-801): records src as having reported
-// round's timeout, and if round already has quorum (f+1 distinct senders)
-// evidence and is ahead of our current round, fast-forwards straight to it
-// -- not just round+1, matching the spec's StartRound(p, r) for whichever
-// specific round r reached quorum. Caller must hold cs.mtx.
+// (spec/core/EngramTendermint.tla:780-801): records timeout's signer as
+// having reported round's timeout, and if round already has quorum (f+1
+// distinct signers) evidence and is ahead of our current round,
+// fast-forwards straight to it -- not just round+1, matching the spec's
+// StartRound(p, r) for whichever specific round r reached quorum. Caller
+// must hold cs.mtx and must have already verified timeout's signature
+// against the current validator set (handleTimeoutMessage /
+// broadcastTimeoutForRound both do this before calling in).
 //
-// Voting power is not weighted here (unlike CometBFT's 2/3+ vote quorums) --
-// this prototype's genesis gives every validator equal power (see
-// engramd's `testnet init-files`), so a plain count of distinct senders is
-// exactly equivalent to a stake-weighted f+1 threshold for this deployment.
-// A production system with unequal stake would need TimeoutMessage to carry
-// a signed validator identity (like Vote does) so the threshold could be
-// computed on voting power instead of raw peer count.
-func (cs *State) recordTimeoutSenderAndMaybeAdvance(height int64, round int32, src p2p.ID) {
+// Tallying is keyed by validator address (ValidatorAddress), not by p2p
+// peer identity: a Timeout with no signature check and a peer-ID-keyed
+// tally (an earlier version of this code) would let ANY connected peer --
+// including a non-validator full node, or a single validator opening
+// several p2p connections -- manufacture as many distinct "senders" as it
+// wants, forging an f+1 quorum without controlling any real stake and
+// forcing honest validators to round-skip on command. Requiring a valid
+// signature from a validator in cs.Validators, and deduplicating by that
+// validator's address, restores the same guarantee CometBFT's 2/3+ vote
+// quorums already have: only genuine validator stake can move consensus
+// forward.
+//
+// Voting power is still not weighted (unlike CometBFT's 2/3+ vote quorums)
+// -- this prototype's genesis gives every validator equal power (see
+// engramd's `testnet init-files`), so a plain count of distinct validator
+// signers is exactly equivalent to a stake-weighted f+1 threshold for this
+// deployment. A production system with unequal stake would need to sum
+// timeout.ValidatorIndex's voting power instead of counting signers.
+func (cs *State) recordTimeoutSenderAndMaybeAdvance(height int64, round int32, timeout *types.Timeout) {
 	if cs.timeoutSenders[round] == nil {
-		cs.timeoutSenders[round] = make(map[p2p.ID]struct{})
+		cs.timeoutSenders[round] = make(map[string]struct{})
 	}
-	cs.timeoutSenders[round][src] = struct{}{}
+	cs.timeoutSenders[round][string(timeout.ValidatorAddress)] = struct{}{}
 
 	if round <= cs.Round {
 		return // no new information -- we're already at or past this round
 	}
 
-	f := (cs.Validators.Size() - 1) / 3 // N = 3f+1: f+1 distinct senders guarantees at least one honest one
+	f := (cs.Validators.Size() - 1) / 3 // N = 3f+1: f+1 distinct signers guarantees at least one honest one
 	threshold1 := f + 1
 	if len(cs.timeoutSenders[round]) >= threshold1 {
 		cs.Logger.Info("f+1 timeout quorum reached, fast-forwarding round",
-			"height", height, "from_round", cs.Round, "to_round", round, "senders", len(cs.timeoutSenders[round]))
+			"height", height, "from_round", cs.Round, "to_round", round, "signers", len(cs.timeoutSenders[round]))
 		cs.enterNewRound(height, round)
 	}
 }
@@ -1461,7 +1527,7 @@ func (cs *State) createProposalBlock(ctx context.Context) (*types.Block, error) 
 
 	proposerAddr := cs.privValidatorPubKey.Address()
 
-	ret, err := cs.blockExec.CreateProposalBlock(ctx, cs.Height, cs.state, lastExtCommit, proposerAddr)
+	ret, err := cs.blockExec.CreateProposalBlock(ctx, cs.Height, cs.Round, cs.state, lastExtCommit, proposerAddr)
 	if err != nil {
 		panic(err)
 	}
@@ -1535,7 +1601,7 @@ func (cs *State) defaultDoPrevote(height int64, round int32) {
 		Please see `PrepareProosal`-`ProcessProposal` coherence and determinism properties
 		in the ABCI++ specification.
 	*/
-	isAppValid, err := cs.blockExec.ProcessProposal(cs.ProposalBlock, cs.state)
+	isAppValid, err := cs.blockExec.ProcessProposal(cs.ProposalBlock, cs.Round, cs.state)
 	if err != nil {
 		panic(fmt.Sprintf(
 			"state machine returned an error (%v) when calling ProcessProposal", err,

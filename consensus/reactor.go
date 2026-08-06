@@ -503,7 +503,7 @@ func (conR *Reactor) subscribeToBroadcastEvents() {
 		types.EventTimeoutCert,
 		func(data cmtevents.EventData) {
 			ti := data.(TimeoutCertInfo)
-			conR.broadcastTimeoutMessage(ti.Height, ti.Round)
+			conR.broadcastTimeoutMessage(ti.Timeout)
 		},
 	)
 	if err != nil {
@@ -556,11 +556,11 @@ func (conR *Reactor) broadcastNewValidBlockMessage(rs *cstypes.RoundState) {
 	}()
 }
 
-// broadcastTimeoutMessage gossips a TimeoutMessage for (height, round) --
-// M0b's f+1-quorum round-skip, triggered by State.broadcastTimeoutForRound
-// via the EventTimeoutCert listener above.
-func (conR *Reactor) broadcastTimeoutMessage(height int64, round int32) {
-	msg := &cmtcons.Timeout{Height: height, Round: round}
+// broadcastTimeoutMessage gossips a signed Timeout attestation -- M0b's
+// f+1-quorum round-skip, triggered by State.broadcastTimeoutForRound via the
+// EventTimeoutCert listener above.
+func (conR *Reactor) broadcastTimeoutMessage(timeout *types.Timeout) {
+	msg := &cmtcons.Timeout{Timeout: timeout.ToProto()}
 	go func() {
 		conR.Switch.BroadcastAsync(p2p.Envelope{
 			ChannelID: StateChannel,
@@ -1951,29 +1951,29 @@ func (m *HasVoteMessage) String() string {
 
 // TimeoutMessage is broadcast when a validator's local round timer expires
 // (engram-sovereign-fsm's M0b, spec/core/EngramTendermint.tla's
-// BroadcastTimeout). Receiving f+1 distinct TimeoutMessages for some round
+// BroadcastTimeout). Receiving f+1 distinct, validly-signed TimeoutMessages
+// (one per validator, verified against the validator set) for some round
 // r > our current round is what lets an honest validator fast-forward to r
 // without waiting out its own local timer (UponfPlusOneTimeoutsAny) -- see
-// state.go's handleTimeoutMessage for the quorum-counting side.
+// state.go's handleTimeoutMessage for the signature-verify-then-count
+// quorum side. The signature is load-bearing: without it, any connected
+// peer (not necessarily a validator) could forge enough distinct p2p
+// identities to fake an f+1 quorum and force a premature round-skip.
 type TimeoutMessage struct {
-	Height int64
-	Round  int32
+	Timeout *types.Timeout
 }
 
 // ValidateBasic performs basic validation.
 func (m *TimeoutMessage) ValidateBasic() error {
-	if m.Height < 0 {
-		return cmterrors.ErrNegativeField{Field: "Height"}
+	if m.Timeout == nil {
+		return cmterrors.ErrRequiredField{Field: "Timeout"}
 	}
-	if m.Round < 0 {
-		return cmterrors.ErrNegativeField{Field: "Round"}
-	}
-	return nil
+	return m.Timeout.ValidateBasic()
 }
 
 // String returns a string representation.
 func (m *TimeoutMessage) String() string {
-	return fmt.Sprintf("[Timeout H:%v R:%v]", m.Height, m.Round)
+	return fmt.Sprintf("[Timeout %v]", m.Timeout)
 }
 
 //-------------------------------------

@@ -274,6 +274,26 @@ func (pv *FilePV) SignProposal(chainID string, proposal *cmtproto.Proposal) erro
 	return nil
 }
 
+// SignTimeout signs a Timeout attestation (M0b f+1-quorum round-skip, see
+// types.Timeout's doc). Implements PrivValidator. Unlike SignVote/
+// SignProposal, this deliberately does NOT consult/update pv.LastSignState:
+// that HRS (height/round/step) bookkeeping exists to prevent double-signing
+// two different blocks at the same height/round, a slashable equivocation.
+// A Timeout carries no block reference, so a validator legitimately signing
+// several different candidate rounds for the same height is not an
+// equivocation -- there is nothing here for double-sign protection to guard
+// against.
+func (pv *FilePV) SignTimeout(chainID string, timeout *cmtproto.Timeout) error {
+	signBytes := types.TimeoutSignBytes(chainID, timeout.Height, timeout.Round)
+	sig, err := pv.Key.PrivKey.Sign(signBytes)
+	if err != nil {
+		return fmt.Errorf("error signing timeout: %v", err)
+	}
+	timeout.ValidatorAddress = pv.Key.Address
+	timeout.Signature = sig
+	return nil
+}
+
 // Save persists the FilePV to disk.
 func (pv *FilePV) Save() {
 	pv.Key.Save()
