@@ -239,6 +239,13 @@ func (*Peer) IsOutbound() bool { return true }
 // statistics are not available with the libp2p transport.
 func (*Peer) Status() conn.ConnectionStatus { return conn.ConnectionStatus{} }
 
+// RTT is not measured on the libp2p transport (dormant on every real
+// deployment to date, config.toml's [p2p.libp2p] enabled = false) --
+// matches this package's existing PeerLatencyMs=0 limitation
+// (health_monitor.go). Host.Ping exists as a lower-level primitive but is
+// not wired into per-peer RTT tracking here.
+func (*Peer) RTT() time.Duration { return 0 }
+
 func (*Peer) FlushStop()             {}
 func (*Peer) SetRemovalFailed()      {}
 func (*Peer) GetRemovalFailed() bool { return false }

@@ -4,6 +4,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -23,6 +24,7 @@ func (mp *mockPeer) TrySend(Envelope) bool    { return true }
 func (mp *mockPeer) Send(Envelope) bool       { return true }
 func (mp *mockPeer) NodeInfo() NodeInfo       { return DefaultNodeInfo{} }
 func (mp *mockPeer) Status() ConnectionStatus { return ConnectionStatus{} }
+func (mp *mockPeer) RTT() time.Duration       { return 0 }
 func (mp *mockPeer) ID() ID                   { return mp.id }
 func (mp *mockPeer) IsOutbound() bool         { return false }
 func (mp *mockPeer) IsPersistent() bool       { return true }

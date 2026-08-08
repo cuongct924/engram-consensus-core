@@ -117,6 +117,18 @@ type MConnection struct {
 
 	created time.Time // time of creation
 
+	// Real RTT measurement, docs/EXPERIMENT.md's E4/A4 (Relay Node Attack) --
+	// piggybacks on the keep-alive PacketPing/PacketPong exchange already
+	// happening every PingInterval (default 60s) below, rather than adding a
+	// new reactor/protobuf message type: lastPingSentAtNano is set right
+	// before a PacketPing is written, lastRTTNano is computed as
+	// time.Since(that) the moment the matching PacketPong is read back in
+	// recvRoutine. Atomics because pingTimer fires from this connection's own
+	// send-goroutine while RTT() (called from a P2P health-sensor polling
+	// loop elsewhere) reads from a different goroutine.
+	lastPingSentAtNano atomic.Int64
+	lastRTTNano         atomic.Int64
+
 	_maxPacketMsgSize int
 }
 
@@ -447,6 +459,7 @@ FOR_LOOP:
 			}
 		case <-c.pingTimer.C:
 			c.Logger.Debug("Send Ping")
+			c.lastPingSentAtNano.Store(time.Now().UnixNano())
 			_n, err = protoWriter.WriteMsg(mustWrapPacket(&tmp2p.PacketPing{}))
 			if err != nil {
 				c.Logger.Error("Failed to send PacketPing", "err", err)
@@ -649,6 +662,9 @@ FOR_LOOP:
 			}
 		case *tmp2p.Packet_PacketPong:
 			c.Logger.Debug("Receive Pong")
+			if sentAt := c.lastPingSentAtNano.Load(); sentAt != 0 {
+				c.lastRTTNano.Store(time.Now().UnixNano() - sentAt)
+			}
 			select {
 			case c.pongTimeoutCh <- false:
 			default:
@@ -745,6 +761,14 @@ func (c *MConnection) Status() ConnectionStatus {
 		}
 	}
 	return status
+}
+
+// RTT returns the round-trip time measured from this connection's most
+// recent PacketPing/PacketPong exchange (see lastPingSentAtNano/lastRTTNano's
+// doc), or 0 if no exchange has completed yet -- e.g. a fresh connection
+// younger than one PingInterval (default 60s).
+func (c *MConnection) RTT() time.Duration {
+	return time.Duration(c.lastRTTNano.Load())
 }
 
 //-----------------------------------------------------------------------------

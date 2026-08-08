@@ -2,6 +2,7 @@ package mock
 
 import (
 	"net"
+	"time"
 
 	"github.com/cometbft/cometbft/crypto/ed25519"
 	"github.com/cometbft/cometbft/libs/service"
@@ -52,6 +53,7 @@ func (mp *Peer) NodeInfo() p2p.NodeInfo {
 	}
 }
 func (mp *Peer) Status() conn.ConnectionStatus { return conn.ConnectionStatus{} }
+func (mp *Peer) RTT() time.Duration            { return 0 }
 func (mp *Peer) ID() p2p.ID                    { return mp.id }
 func (mp *Peer) IsOutbound() bool              { return mp.Outbound }
 func (mp *Peer) IsPersistent() bool            { return mp.Persistent }

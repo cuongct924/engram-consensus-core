@@ -35,6 +35,7 @@ type Peer interface {
 
 	NodeInfo() NodeInfo // peer's info
 	Status() cmtconn.ConnectionStatus
+	RTT() time.Duration      // real round-trip time from the connection's ping/pong keep-alive (0 if not yet measured)
 	SocketAddr() *NetAddress // actual address of the socket
 
 	Send(Envelope) bool
@@ -247,6 +248,14 @@ func (p *peer) SocketAddr() *NetAddress {
 // Status returns the peer's ConnectionStatus.
 func (p *peer) Status() cmtconn.ConnectionStatus {
 	return p.mconn.Status()
+}
+
+// RTT returns the peer's real round-trip time, measured from the
+// underlying MConnection's own PacketPing/PacketPong keep-alive exchange
+// (see cmtconn.MConnection.RTT's doc) -- 0 until at least one exchange has
+// completed.
+func (p *peer) RTT() time.Duration {
+	return p.mconn.RTT()
 }
 
 // Send msg bytes to the channel identified by chID byte. Returns false if the
