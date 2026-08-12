@@ -287,6 +287,10 @@ func (conR *Reactor) Receive(e p2p.Envelope) {
 		case *HasVoteMessage:
 			ps.ApplyHasVoteMessage(msg)
 		case *TimeoutMessage:
+			if !ps.allowTimeoutMessage() {
+				conR.Logger.Debug("dropping TimeoutMessage: per-peer rate limit exceeded", "peer", e.Src)
+				return
+			}
 			// M0b: route into cs.peerMsgQueue like votes/proposals -- State's
 			// receiveRoutine processes it under cs.mtx via handleTimeoutMessage.
 			conR.conS.peerMsgQueue <- msgInfo{msg, e.Src.ID()}
@@ -1115,6 +1119,36 @@ type PeerState struct {
 	mtx   sync.Mutex             // NOTE: Modify below using setters, never directly.
 	PRS   cstypes.PeerRoundState `json:"round_state"` // Exposed.
 	Stats *peerStateStats        `json:"stats"`       // Exposed.
+
+	// M0b: per-peer Timeout rate limiting -- see allowTimeoutMessage's doc.
+	timeoutWindowStart time.Time
+	timeoutWindowCount int
+}
+
+// timeoutRateLimitWindow/maxTimeoutMsgsPerWindow bound how many
+// TimeoutMessages one peer's connection is trusted per window -- a genuine
+// f+1 round-skip needs at most one Timeout per peer per real round change
+// (paced by TIMEOUT_DURATION, on the order of seconds), so 20/second is a
+// generous margin over legitimate traffic, not a tight one.
+const (
+	timeoutRateLimitWindow  = time.Second
+	maxTimeoutMsgsPerWindow = 20
+)
+
+// allowTimeoutMessage applies a simple per-peer fixed-window rate limit to
+// incoming TimeoutMessages (docs/EXPERIMENT.md's E8 "Timeout flooding" row):
+// dropped here, before reaching cs.peerMsgQueue, so a flooding peer can't
+// starve that shared queue for every other message type/peer either.
+func (ps *PeerState) allowTimeoutMessage() bool {
+	ps.mtx.Lock()
+	defer ps.mtx.Unlock()
+	now := cmttime.Now()
+	if now.Sub(ps.timeoutWindowStart) > timeoutRateLimitWindow {
+		ps.timeoutWindowStart = now
+		ps.timeoutWindowCount = 0
+	}
+	ps.timeoutWindowCount++
+	return ps.timeoutWindowCount <= maxTimeoutMsgsPerWindow
 }
 
 // peerStateStats holds internal statistics for a peer.

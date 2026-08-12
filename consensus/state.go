@@ -9,6 +9,7 @@ import (
 	"os"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/cosmos/gogoproto/proto"
@@ -409,6 +410,14 @@ func (cs *State) OnStart() error {
 
 	// now start the receiveRoutine
 	go cs.receiveRoutine(0)
+
+	// docs/EXPERIMENT.md's E8 "Timeout flooding by Byzantine nodes" row:
+	// deliberate misbehavior for testing only, see timeoutFloodRoutine's doc.
+	if interval, ok := timeoutFloodInterval(); ok {
+		cs.Logger.Error(timeoutFloodEnv+" is set -- actively flooding signed Timeout messages, NEVER set this on a real validator",
+			"interval", interval)
+		go cs.timeoutFloodRoutine(interval)
+	}
 
 	// schedule the first round!
 	// use GetRoundState so we don't race the receiveRoutine for access
@@ -1065,6 +1074,60 @@ func (cs *State) broadcastTimeoutForRound(height int64, round int32) {
 	cs.evsw.FireEvent(types.EventTimeoutCert, TimeoutCertInfo{Timeout: signed})
 }
 
+// timeoutFloodEnv gates the E8 "Timeout flooding" Byzantine test hook
+// (docs/EXPERIMENT.md, engram-sovereign-fsm repo) -- like
+// ENGRAM_BYZANTINE_BEHAVIOR, never set on a real validator.
+const timeoutFloodEnv = "ENGRAM_TIMEOUT_FLOOD_INTERVAL_MS"
+
+// timeoutFloodInterval reads timeoutFloodEnv as a positive millisecond
+// duration; ok is false if unset, non-numeric, or <= 0 (flooding off).
+func timeoutFloodInterval() (interval time.Duration, ok bool) {
+	raw := os.Getenv(timeoutFloodEnv)
+	if raw == "" {
+		return 0, false
+	}
+	ms, err := strconv.Atoi(raw)
+	if err != nil || ms <= 0 {
+		return 0, false
+	}
+	return time.Duration(ms) * time.Millisecond, true
+}
+
+// timeoutFloodRoutine bypasses RoundStepPrecommitWait's real timer, actively
+// re-broadcasting a signed Timeout for round+1 every interval -- unlike
+// SIGKILL-based fault injection (chaos-crash), this sends genuinely signed
+// messages, stress-testing recordTimeoutSenderAndMaybeAdvance's per-address
+// dedup against a validator that never waits its turn.
+func (cs *State) timeoutFloodRoutine(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-cs.Quit():
+			return
+		case <-ticker.C:
+			cs.mtx.Lock()
+			height, round := cs.Height, cs.Round
+			cs.broadcastTimeoutForRound(height, round+1)
+			cs.mtx.Unlock()
+		}
+	}
+}
+
+// maxTimeoutRoundLookahead bounds how far ahead of cs.Round a Timeout is
+// even considered, rejected before the costly signature Verify() call --
+// closes a DoS gap docs/EXPERIMENT.md's E8 "Timeout flooding" row surfaced:
+// an active Byzantine validator could otherwise force honest nodes to pay
+// real crypto-verify cost, and grow cs.timeoutSenders with a new map entry,
+// for any number of distinct fabricated round values. Every honest
+// broadcastTimeoutForRound call only ever targets round[p]+1 (see its own
+// doc), so legitimate round advances only ever chain forward one round at a
+// time -- a lagging node catches up via a sequence of such +1 jumps, not one
+// message claiming a round far in the future. 5 is a deliberately generous
+// margin over that, not a tight one: too small risks rejecting genuine
+// catch-up evidence after a real network hiccup; revisit if that's observed.
+const maxTimeoutRoundLookahead = 5
+
 // handleTimeoutMessage processes an incoming TimeoutMessage from a peer
 // (cs.mtx already held by the caller, via handleMsg). The peer's raw p2p
 // identity (peerID) is deliberately NOT used for quorum accounting -- see
@@ -1076,6 +1139,14 @@ func (cs *State) handleTimeoutMessage(msg *TimeoutMessage, peerID p2p.ID) {
 		// Not our current height -- mirrors the spec's implicit per-height
 		// scoping of msgs_timeout (evidence from a different height carries
 		// no information here).
+		return
+	}
+	// round <= cs.Round is already dead weight (recordTimeoutSenderAndMaybeAdvance
+	// never acts on it -- "no new information" per its own comment); round far
+	// ahead is implausible for honest chained broadcasts (see
+	// maxTimeoutRoundLookahead's doc). Both rejected here, before Verify(), so
+	// neither costs a signature check or a cs.timeoutSenders map entry.
+	if timeout.Round <= cs.Round || timeout.Round > cs.Round+maxTimeoutRoundLookahead {
 		return
 	}
 
@@ -1281,6 +1352,20 @@ func (cs *State) enterNewRound(height int64, round int32) {
 
 	if now := cmttime.Now(); cs.StartTime.After(now) {
 		logger.Debug("need to set a buffer and log message here for sanity", "start_time", cs.StartTime, "now", now)
+	}
+
+	// M0b: entries at or below the round we're entering are now permanently
+	// dead weight (recordTimeoutSenderAndMaybeAdvance never acts on round <=
+	// cs.Round) -- evict them here, the single choke point every round
+	// advance passes through, rather than only on height change
+	// (cs.timeoutSenders otherwise grows one entry per distinct round number
+	// ever seen within a height, an unbounded-memory flood vector).
+	if cs.Round < round {
+		for r := range cs.timeoutSenders {
+			if r <= round {
+				delete(cs.timeoutSenders, r)
+			}
+		}
 	}
 
 	prevHeight, prevRound, prevStep := cs.Height, cs.Round, cs.Step

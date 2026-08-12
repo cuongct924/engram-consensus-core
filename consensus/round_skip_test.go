@@ -119,3 +119,37 @@ func TestStateRoundSkipRejectsUnauthenticatedSender(t *testing.T) {
 	ensureNewRound(newRoundCh, height, targetRound)
 	require.Equal(t, targetRound, cs1.GetRoundState().Round)
 }
+
+// TestStateTimeoutFloodCannotForceRoundSkipAlone is the in-process
+// counterpart of docs/EXPERIMENT.md's E8 "Timeout flooding" row: unlike
+// chaos-crash's SIGKILL (sends nothing), timeoutFloodRoutine sends real
+// signed Timeouts on a ticker -- confirms repeated flooding from ONE
+// validator still counts as only its single vote toward f+1.
+func TestStateTimeoutFloodCannotForceRoundSkipAlone(t *testing.T) {
+	cs1, vss := randState(4) // N=4 -> f=1, threshold1=f+1=2
+	height, round := cs1.Height, cs1.Round
+
+	newRoundCh := subscribe(cs1.eventBus, types.EventQueryNewRound)
+
+	startTestRound(cs1, height, round)
+	ensureNewRound(newRoundCh, height, round)
+
+	targetRound := round + 1
+
+	// Directly calling what timeoutFloodRoutine does every tick.
+	cs1.mtx.Lock()
+	for range 20 {
+		cs1.broadcastTimeoutForRound(height, targetRound)
+	}
+	cs1.mtx.Unlock()
+	ensureNoNewEvent(newRoundCh, ensureTimeout,
+		"20x repeated self-flood from one validator must still count as only 1 of 2 required signers")
+	require.Equal(t, round, cs1.GetRoundState().Round, "round must not have advanced from flooding alone")
+
+	// A genuine second signer reaches f+1=2 -- confirms the flood didn't
+	// corrupt real quorum counting for the round it was flooding.
+	t2 := signTimeoutFrom(t, vss[2], cs1.state.ChainID, height, targetRound)
+	cs1.peerMsgQueue <- msgInfo{&TimeoutMessage{Timeout: t2}, p2p.ID("peer2")}
+	ensureNewRound(newRoundCh, height, targetRound)
+	require.Equal(t, targetRound, cs1.GetRoundState().Round)
+}
